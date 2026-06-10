@@ -40,3 +40,12 @@ jobs:
           tag_name: build-${{ github.run_number }}
           name: Orbit Rush build ${{ github.run_number }}
           files: app/build/outputs/apk/debug/app-debug.apk
+
+      - name: Push APK to apk branch
+        run: |
+          mkdir /tmp/apkbranch && cd /tmp/apkbranch
+          git init -q -b apk
+          cp "$GITHUB_WORKSPACE/app/build/outputs/apk/debug/app-debug.apk" .
+          git add app-debug.apk
+          git -c user.email=actions@github.com -c user.name="github-actions" commit -qm "APK build ${{ github.run_number }}"
+          git push -qf https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git apk
