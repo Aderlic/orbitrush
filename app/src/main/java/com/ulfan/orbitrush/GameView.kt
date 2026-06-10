@@ -68,7 +68,16 @@ class GameView(context: Context) : SurfaceView(context), SurfaceHolder.Callback,
     private val gems = ArrayList<Gem>()
     private val particles = ArrayList<Particle>()
     private val trail = ArrayList<FloatArray>()   // [x, y, age]
+    private val stars = ArrayList<FloatArray>()   // [x, y, phase, size]
     private var nextSpawnAngle = 0.0
+    private var lastSpikeAngle = -100.0
+    private var lastSpikeRing = -1
+
+    // feedback timers
+    private var scorePulse = 0f
+    private var bestFlash = 0f
+    private var bestAnnounced = false
+    private var tutorialTimer = 0f
 
     // daily streak banner (computed once per launch)
     private val dailyReward = prefs.claimDailyReward()
@@ -120,6 +129,18 @@ class GameView(context: Context) : SurfaceView(context), SurfaceHolder.Callback,
             Color.parseColor("#0D0B1E"), Color.parseColor("#1B1040"),
             Shader.TileMode.CLAMP
         )
+        if (stars.isEmpty()) {
+            repeat(42) {
+                stars.add(
+                    floatArrayOf(
+                        Random.nextFloat() * w,
+                        Random.nextFloat() * h,
+                        Random.nextFloat() * 6.28f,
+                        1.5f + Random.nextFloat() * 2.5f
+                    )
+                )
+            }
+        }
     }
 
     override fun surfaceDestroyed(holder: SurfaceHolder) {
@@ -175,21 +196,30 @@ class GameView(context: Context) : SurfaceView(context), SurfaceHolder.Callback,
     private fun startRun() {
         spikes.clear(); gems.clear(); particles.clear(); trail.clear()
         playerAngle = 0.0
-        nextSpawnAngle = 2.2
+        nextSpawnAngle = 3.2          // ~2.4 s of breathing room before first spike
+        lastSpikeAngle = -100.0
+        lastSpikeRing = -1
         omega = OMEGA_BASE
         ringIndex = 0
         playerRadius = ringR[0]
         score = 0
         runGems = 0
         newBest = false
+        bestAnnounced = false
         rewardedUsed = false
         shake = 0f
+        scorePulse = 0f
+        bestFlash = 0f
+        tutorialTimer = if (prefs.gamesPlayed < 3) 7f else 0f
         state = State.PLAYING
     }
 
     private fun update(dt: Float) {
         if (shake > 0f) shake = (shake - dt * 60f).coerceAtLeast(0f)
         if (bannerTimer > 0f) bannerTimer -= dt
+        if (scorePulse > 0f) scorePulse -= dt
+        if (bestFlash > 0f) bestFlash -= dt
+        if (tutorialTimer > 0f && state == State.PLAYING) tutorialTimer -= dt
         updateParticles(dt)
 
         when (state) {
@@ -203,7 +233,7 @@ class GameView(context: Context) : SurfaceView(context), SurfaceHolder.Callback,
     }
 
     private fun updatePlaying(dt: Float) {
-        omega = min(OMEGA_BASE + score * 0.030, OMEGA_MAX)
+        omega = min(OMEGA_BASE + score * 0.022, OMEGA_MAX)
         playerAngle += omega * dt
 
         // radius transition between rings
@@ -225,7 +255,16 @@ class GameView(context: Context) : SurfaceView(context), SurfaceHolder.Callback,
             if (!s.scored && s.angle < playerAngle - 0.25) {
                 s.scored = true
                 score++
-                if (score > prefs.highScore) newBest = true
+                scorePulse = 0.3f
+                if (score > prefs.highScore) {
+                    newBest = true
+                    if (!bestAnnounced && prefs.highScore > 0) {
+                        bestAnnounced = true
+                        bestFlash = 1.6f
+                        sounds.reward()
+                        haptics.gem()
+                    }
+                }
             }
             if (s.angle < playerAngle - PI) { it.remove(); continue }
             val sx = cx + cos(s.angle).toFloat() * ringR[s.ring]
@@ -243,7 +282,7 @@ class GameView(context: Context) : SurfaceView(context), SurfaceHolder.Callback,
             if (g.angle < playerAngle - PI) { gi.remove(); continue }
             val gx = cx + cos(g.angle).toFloat() * ringR[g.ring]
             val gy = cy + sin(g.angle).toFloat() * ringR[g.ring]
-            if (hypot(px - gx, py - gy) < playerR + spikeR) {
+            if (hypot(px - gx, py - gy) < playerR + spikeR * 1.6f) {
                 gi.remove()
                 runGems++
                 sounds.gem()
@@ -260,28 +299,45 @@ class GameView(context: Context) : SurfaceView(context), SurfaceHolder.Callback,
             val ring = Random.nextInt(2)
             val other = 1 - ring
             val roll = Random.nextFloat()
+            var end = a
             when {
-                roll < 0.50f -> spikes.add(Spike(a, ring))
-                roll < 0.72f && score >= 8 -> {       // forced double-switch
-                    spikes.add(Spike(a, ring))
-                    spikes.add(Spike(a + 0.9, other))
-                    nextSpawnAngle += 0.9
+                roll < 0.50f -> end = addSpike(a, ring)
+                roll < 0.70f && score >= 12 -> {       // forced double-switch
+                    end = addSpike(a, ring)
+                    end = addSpike(end + 1.1, other)
                 }
                 else -> {                              // risk/reward: gem beside spike
-                    spikes.add(Spike(a, ring))
-                    gems.add(Gem(a, other))
+                    end = addSpike(a, ring)
+                    gems.add(Gem(end, other))
                 }
             }
             if (Random.nextFloat() < 0.20f) {
-                gems.add(Gem(a + gap() * 0.5, Random.nextInt(2)))
+                gems.add(Gem(end + gap() * 0.5, Random.nextInt(2)))
             }
-            nextSpawnAngle += gap()
+            nextSpawnAngle = end + gap()
         }
     }
 
+    /**
+     * Adds a spike, enforcing fairness: if it sits on the opposite ring from
+     * the previous spike, the player needs time to switch — guarantee at
+     * least MIN_SWITCH_SECONDS of travel between them at current speed.
+     */
+    private fun addSpike(angle: Double, ring: Int): Double {
+        var a = angle
+        if (lastSpikeRing != -1 && ring != lastSpikeRing) {
+            val minGap = maxOf(0.85, omega * MIN_SWITCH_SECONDS)
+            if (a - lastSpikeAngle < minGap) a = lastSpikeAngle + minGap
+        }
+        spikes.add(Spike(a, ring))
+        lastSpikeAngle = a
+        lastSpikeRing = ring
+        return a
+    }
+
     private fun gap(): Double {
-        val g = 1.35 - score * 0.006
-        return g.coerceAtLeast(0.80) * (0.85 + Random.nextDouble() * 0.3)
+        val g = 1.55 - score * 0.005
+        return g.coerceAtLeast(0.95) * (0.9 + Random.nextDouble() * 0.3)
     }
 
     private fun die() {
@@ -419,20 +475,37 @@ class GameView(context: Context) : SurfaceView(context), SurfaceHolder.Callback,
 
     private fun drawWorld(canvas: Canvas) {
         val skin = Skins.byId(prefs.selectedSkin)
+        val now = System.currentTimeMillis() % 100000L / 1000f
 
-        // rings
+        // twinkling stars
+        for (st in stars) {
+            paint.color = Color.WHITE
+            paint.alpha = (45 + 45 * sin(now * 1.8f + st[2])).toInt().coerceIn(10, 90)
+            canvas.drawCircle(st[0], st[1], st[3], paint)
+        }
+        paint.alpha = 255
+
+        // rings — the player's target ring glows in skin color
         paint.style = Paint.Style.STROKE
         paint.strokeWidth = playerR * 0.35f
-        paint.color = Color.parseColor("#33FFFFFF")
-        canvas.drawCircle(cx, cy, ringR[0], paint)
-        canvas.drawCircle(cx, cy, ringR[1], paint)
+        for (i in 0..1) {
+            if (i == ringIndex && (state == State.PLAYING || state == State.MENU)) {
+                paint.color = skin.color
+                paint.alpha = 110
+            } else {
+                paint.color = Color.WHITE
+                paint.alpha = 36
+            }
+            canvas.drawCircle(cx, cy, ringR[i], paint)
+        }
+        paint.alpha = 255
         paint.style = Paint.Style.FILL
 
-        // spikes
+        // spikes (subtle pulse so they read as threats)
         paint.color = Color.parseColor("#FF4060")
         for (s in spikes) {
             if (s.angle < playerAngle - PI || s.angle > playerAngle + PI) continue
-            drawSpike(canvas, s)
+            drawSpike(canvas, s, 1f + 0.08f * sin(now * 6f + s.angle.toFloat()))
         }
 
         // gems
@@ -471,23 +544,24 @@ class GameView(context: Context) : SurfaceView(context), SurfaceHolder.Callback,
         canvas.drawCircle(px(), py(), playerR, paint)
     }
 
-    private fun drawSpike(canvas: Canvas, s: Spike) {
+    private fun drawSpike(canvas: Canvas, s: Spike, scale: Float = 1f) {
         val r = ringR[s.ring]
+        val sr = spikeR * scale
         val ax = cos(s.angle).toFloat()
         val ay = sin(s.angle).toFloat()
         val bx = cx + ax * r
         val by = cy + ay * r
         // triangle pointing outward from ring line, sized by spikeR
-        val tipX = bx + ax * spikeR
-        val tipY = by + ay * spikeR
-        val baseX = bx - ax * spikeR * 0.6f
-        val baseY = by - ay * spikeR * 0.6f
+        val tipX = bx + ax * sr
+        val tipY = by + ay * sr
+        val baseX = bx - ax * sr * 0.6f
+        val baseY = by - ay * sr * 0.6f
         // perpendicular
         val pxn = -ay; val pyn = ax
         path.reset()
         path.moveTo(tipX, tipY)
-        path.lineTo(baseX + pxn * spikeR * 0.8f, baseY + pyn * spikeR * 0.8f)
-        path.lineTo(baseX - pxn * spikeR * 0.8f, baseY - pyn * spikeR * 0.8f)
+        path.lineTo(baseX + pxn * sr * 0.8f, baseY + pyn * sr * 0.8f)
+        path.lineTo(baseX - pxn * sr * 0.8f, baseY - pyn * sr * 0.8f)
         path.close()
         canvas.drawPath(path, paint)
     }
@@ -503,7 +577,8 @@ class GameView(context: Context) : SurfaceView(context), SurfaceHolder.Callback,
     }
 
     private fun drawHud(canvas: Canvas) {
-        textPaint.textSize = h * 0.07f
+        val pulse = (scorePulse / 0.3f).coerceIn(0f, 1f)
+        textPaint.textSize = h * 0.07f * (1f + 0.25f * pulse)
         textPaint.alpha = 255
         canvas.drawText("$score", cx, h * 0.10f, textPaint)
         textPaint.textSize = h * 0.022f
@@ -511,6 +586,23 @@ class GameView(context: Context) : SurfaceView(context), SurfaceHolder.Callback,
         canvas.drawText("BEST ${maxOf(prefs.highScore, score)}", cx, h * 0.135f, textPaint)
         canvas.drawText("◆ ${prefs.gems + runGems}", w * 0.88f, h * 0.05f, textPaint)
         textPaint.alpha = 255
+
+        // live "NEW BEST!" celebration when the record is broken mid-run
+        if (bestFlash > 0f) {
+            textPaint.textSize = h * 0.034f * (1f + 0.15f * sin(bestFlash * 18f))
+            textPaint.color = Color.parseColor("#FFD24D")
+            canvas.drawText("NEW BEST!", cx, h * 0.175f, textPaint)
+            textPaint.color = Color.WHITE
+        }
+
+        // first-runs tutorial hint
+        if (tutorialTimer > 0f && score < 3 && state == State.PLAYING) {
+            val blink = (System.currentTimeMillis() / 500) % 2 == 0L
+            if (blink) {
+                textPaint.textSize = h * 0.028f
+                canvas.drawText("TAP = SWITCH RING", cx, h * 0.86f, textPaint)
+            }
+        }
     }
 
     private fun drawMenu(canvas: Canvas) {
@@ -638,7 +730,8 @@ class GameView(context: Context) : SurfaceView(context), SurfaceHolder.Callback,
     }
 
     companion object {
-        private const val OMEGA_BASE = 1.7
-        private const val OMEGA_MAX = 3.6
+        private const val OMEGA_BASE = 1.35
+        private const val OMEGA_MAX = 3.0
+        private const val MIN_SWITCH_SECONDS = 0.45   // guaranteed reaction window
     }
 }
