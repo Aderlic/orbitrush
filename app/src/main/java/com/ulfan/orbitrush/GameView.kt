@@ -267,9 +267,13 @@ class GameView(context: Context) : SurfaceView(context), SurfaceHolder.Callback,
                 }
             }
             if (s.angle < playerAngle - PI) { it.remove(); continue }
+            // Only spikes angularly near the player can hit. Without this,
+            // a spike spawned ~2π ahead sits at the same screen position as
+            // the player (but is culled from rendering) — invisible death.
+            if (abs(s.angle - playerAngle) > 1.0) continue
             val sx = cx + cos(s.angle).toFloat() * ringR[s.ring]
             val sy = cy + sin(s.angle).toFloat() * ringR[s.ring]
-            if (hypot(px - sx, py - sy) < playerR + spikeR * 0.72f) {
+            if (hypot(px - sx, py - sy) < playerR + spikeR * 0.62f) {
                 die()
                 return
             }
@@ -280,6 +284,7 @@ class GameView(context: Context) : SurfaceView(context), SurfaceHolder.Callback,
         while (gi.hasNext()) {
             val g = gi.next()
             if (g.angle < playerAngle - PI) { gi.remove(); continue }
+            if (abs(g.angle - playerAngle) > 1.0) continue
             val gx = cx + cos(g.angle).toFloat() * ringR[g.ring]
             val gy = cy + sin(g.angle).toFloat() * ringR[g.ring]
             if (hypot(px - gx, py - gy) < playerR + spikeR * 1.6f) {
