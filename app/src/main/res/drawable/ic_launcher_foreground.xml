@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <!-- outer ring -->
+    <path
+        android:strokeColor="#66FFFFFF"
+        android:strokeWidth="3"
+        android:fillColor="#00000000"
+        android:pathData="M54,54 m-26,0 a26,26 0 1,1 52,0 a26,26 0 1,1 -52,0" />
+    <!-- inner ring -->
+    <path
+        android:strokeColor="#44FFFFFF"
+        android:strokeWidth="2.5"
+        android:fillColor="#00000000"
+        android:pathData="M54,54 m-16,0 a16,16 0 1,1 32,0 a16,16 0 1,1 -32,0" />
+    <!-- player ball on outer ring -->
+    <path
+        android:fillColor="#00E5FF"
+        android:pathData="M80,54 m-6,0 a6,6 0 1,1 12,0 a6,6 0 1,1 -12,0" />
+    <!-- spike -->
+    <path
+        android:fillColor="#FF4060"
+        android:pathData="M54,22 L59,32 L49,32 Z" />
+    <!-- gem -->
+    <path
+        android:fillColor="#4DFFC4"
+        android:pathData="M38,66 L42,70 L38,74 L34,70 Z" />
+</vector>
